@@ -1,0 +1,9 @@
+{
+  "name": "reactions",
+  "version": "0.1.0",
+  "description": "Follow the GitHub Actions runs for the commit you just pushed, from the terminal.",
+  "type": "module",
+  "bin": { "reactions": "reactions.js" },
+  "engines": { "node": ">=18" },
+  "scripts": { "test": "node --test" }
+}
