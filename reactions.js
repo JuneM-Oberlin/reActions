@@ -108,6 +108,12 @@ async function main() {
 // Only run when executed directly, not when the test file imports the helpers.
 // realpath because npm installs the command as a symlink.
 if (realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  // EPIPE means the reader closed the pipe early, as in "reactions watch | head".
+  // Nobody is left to read the output, so stop quietly.
+  process.stdout.on('error', (err) => {
+    if (err.code === 'EPIPE') process.exit(0);
+    throw err;
+  });
   main().catch((err) => {
     console.error(`reactions: ${err.message}`);
     process.exit(2);
