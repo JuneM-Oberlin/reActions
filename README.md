@@ -88,6 +88,7 @@ git push && reactions watch && echo "CI passed"
 3. It calls the GitHub REST API directly: [list workflow runs](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-repository) filtered by the commit, then [list jobs](https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run) for each run.
 4. If a commit has several runs of the same workflow (re-runs, scheduled runs), it follows only the newest run of each workflow.
 5. It polls again after 3 seconds, and each wait is 25% longer than the last, up to 20 seconds.
+6. It sends ETags with each poll, so a poll where nothing changed does not count against the API rate limit. If the rate limit runs low anyway, it polls more slowly.
 
 ## Known limits
 
@@ -122,7 +123,7 @@ Answer "where is my CI, what broke, and is it my fault?"
 10. A demo GIF in this README showing push, watch, a failure, and the triage verdict.
 11. `CONTRIBUTING.md` and "good first issue" labels.
 
-Possible later: a tmux and zsh prompt segment, built as a fast cached `reactions status` command, and fewer API calls through conditional requests with ETags.
+Possible later: a tmux and zsh prompt segment, built as a fast cached `reactions status` command.
 
 Not planned for now: Slack or Discord webhooks, a background daemon, a config file.
 
