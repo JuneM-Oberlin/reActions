@@ -1,9 +1,15 @@
 #!/usr/bin/env node
-// reactions: show the GitHub Actions runs for the commit at HEAD.
+// reactions: follow the GitHub Actions runs for the commit at HEAD until they finish.
 import { execFileSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+
+const FIRST_POLL_MS = 3_000; // wait this long before the second poll
+const MAX_POLL_MS = 20_000; // the wait grows toward this
+const NO_RUNS_TIMEOUT_MS = 30_000; // give up if the commit never gets a run
+const PASSING = ['success', 'skipped', 'neutral']; // run conclusions that count as a pass
 
 // Run a command and return its trimmed stdout. Throws if it exits non-zero;
 // the error message includes the command's stderr.
@@ -57,10 +63,20 @@ export function duration(ms) {
   return `${mm}:${ss}`;
 }
 
-// One job as text, for example "build ok 0:42" or "test running 1:10".
+// The step a running job is on, for example "  (step 4/7: Run npm test)".
+// The API lists every step up front, so the position in the list is the progress.
+export function stepText(job) {
+  const index = job.steps.findIndex((step) => step.status === 'in_progress');
+  if (index === -1) return ''; // between steps
+  return `  (step ${index + 1}/${job.steps.length}: ${job.steps[index].name})`;
+}
+
+// One job as text, for example "build ok 0:42" or "test running 1:10  (step 4/7: Run npm test)".
 export function jobText(job, now) {
   const started = Date.parse(job.started_at);
-  if (job.status === 'in_progress') return `${job.name} running ${duration(now - started)}`;
+  if (job.status === 'in_progress') {
+    return `${job.name} running ${duration(now - started)}${stepText(job)}`;
+  }
   // Not started yet: queued, waiting, requested or pending. No duration to show.
   if (job.status !== 'completed') return `${job.name} ${job.status}`;
 
@@ -69,31 +85,135 @@ export function jobText(job, now) {
   return `${job.name} ${result} ${duration(finished - started)}`;
 }
 
+// A commit can have many runs of the same workflow (re-runs, schedules).
+// Keep only the newest run of each workflow.
+export function latestPerWorkflow(runs) {
+  const newest = new Map();
+  for (const run of runs) {
+    const newestSoFar = newest.get(run.workflow_id);
+    // created_at is an ISO timestamp, so comparing the strings compares the times.
+    if (!newestSoFar || run.created_at > newestSoFar.created_at) {
+      newest.set(run.workflow_id, run);
+    }
+  }
+  return Array.from(newest.values());
+}
+
+// 0 if every run passed, 1 if any did not.
+export function exitCode(runs) {
+  return runs.every((run) => PASSING.includes(run.conclusion)) ? 0 : 1;
+}
+
+// Each wait is 25% longer than the last, up to the maximum.
+export function nextDelay(ms) {
+  return Math.min(MAX_POLL_MS, Math.round(ms * 1.25));
+}
+
+// The whole display as a list of lines. Each entry is { run, jobList }.
+export function render(title, entries, now) {
+  const count = entries.length;
+  const lines = [`${title}   ${count} ${count === 1 ? 'run' : 'runs'}`];
+
+  // Pad every run name to the longest one so the jobs line up in a column.
+  let nameWidth = 0;
+  for (const entry of entries) {
+    nameWidth = Math.max(nameWidth, entry.run.name.length);
+  }
+
+  for (const entry of entries) {
+    const run = entry.run;
+    const jobs = entry.jobList.jobs;
+
+    let line;
+    if (jobs.length === 0) {
+      // A run that was just queued has no jobs yet, so show the run's own status.
+      line = run.status;
+    } else {
+      line = jobs.map((job) => jobText(job, now)).join('    ');
+    }
+
+    const notShown = entry.jobList.total_count - jobs.length;
+    if (notShown > 0) line += `    +${notShown} more`;
+
+    lines.push(`  ${run.name.padEnd(nameWidth)}   ${line}`);
+  }
+  return lines;
+}
+
+// Print the lines on top of the block drawn last time. Returns how many lines
+// are now on screen, to pass back in as previousCount on the next call.
+function redraw(lines, previousCount) {
+  // Cut each line to the terminal width: a wrapped line would take two rows
+  // and the cursor-up count below would be wrong. Some terminals report a
+  // width of 0, which means unknown, so do not cut then.
+  const columns = process.stdout.columns;
+  let shown = lines;
+  if (columns > 0) {
+    shown = lines.map((line) => line.slice(0, columns - 1));
+  }
+
+  // ESC[nA moves the cursor up n lines, ESC[J clears from there to the end of the screen.
+  let erase = '';
+  if (previousCount > 0) {
+    erase = `\x1b[${previousCount}A\x1b[J`;
+  }
+
+  process.stdout.write(erase + shown.join('\n') + '\n');
+  return lines.length;
+}
+
+// Fetch the runs to follow for a commit, each paired with its list of jobs.
+async function fetchEntries(repo, sha, token) {
+  // ponytail: first page only (100 runs, 100 jobs per run). The "+N more"
+  // marker shows when the jobs did not fit; paginate then.
+  const runList = await api(`/repos/${repo}/actions/runs?head_sha=${sha}&per_page=100`, token);
+
+  const entries = [];
+  for (const run of latestPerWorkflow(runList.workflow_runs)) {
+    const jobList = await api(`/repos/${repo}/actions/runs/${run.id}/jobs?per_page=100`, token);
+    entries.push({ run, jobList });
+  }
+  return entries;
+}
+
+// Follow the runs for HEAD until they all complete. Returns the exit code.
 async function watch() {
   const sha = runCmd('git', ['rev-parse', '--verify', 'HEAD']);
   const branch = runCmd('git', ['branch', '--show-current']) || 'detached';
   const repo = parseRemote(runCmd('git', ['remote', 'get-url', 'origin']));
   const token = getToken();
 
-  // ponytail: first page only (100 runs, 100 jobs per run). The "+N more"
-  // marker below shows when that was not enough; paginate then.
-  const runList = await api(`/repos/${repo}/actions/runs?head_sha=${sha}&per_page=100`, token);
-  const runs = runList.workflow_runs;
-  const runCount = runList.total_count;
-  console.log(`${repo} @ ${sha.slice(0, 7)} (${branch})   ${runCount} ${runCount === 1 ? 'run' : 'runs'}`);
+  const title = `${repo} @ ${sha.slice(0, 7)} (${branch})`;
+  const startedAt = Date.now();
+  let delay = FIRST_POLL_MS;
+  let linesOnScreen = 0;
 
-  const nameWidth = Math.max(0, ...runs.map((run) => run.name.length));
-  const now = Date.now();
-  for (const run of runs) {
-    const jobList = await api(`/repos/${repo}/actions/runs/${run.id}/jobs?per_page=100`, token);
-    const jobs = jobList.jobs;
+  while (true) {
+    const entries = await fetchEntries(repo, sha, token);
+    const runs = entries.map((entry) => entry.run);
 
-    // A run that was just queued has no jobs yet, so show the run's own status.
-    let line = jobs.length > 0 ? jobs.map((job) => jobText(job, now)).join('    ') : run.status;
-    const notShown = jobList.total_count - jobs.length;
-    if (notShown > 0) line += `    +${notShown} more`;
+    const found = runs.length > 0;
+    const done = found && runs.every((run) => run.status === 'completed');
 
-    console.log(`  ${run.name.padEnd(nameWidth)}   ${line}`);
+    let lines = [`${title}   waiting for runs`];
+    if (found) {
+      lines = render(title, entries, Date.now());
+    }
+
+    // In a terminal, redraw in place on every poll. When piped, print the final state once.
+    if (process.stdout.isTTY) {
+      linesOnScreen = redraw(lines, linesOnScreen);
+    } else if (done) {
+      console.log(lines.join('\n'));
+    }
+
+    if (done) return exitCode(runs);
+    if (!found && Date.now() - startedAt > NO_RUNS_TIMEOUT_MS) {
+      throw new Error(`no runs found for ${sha.slice(0, 7)} after ${NO_RUNS_TIMEOUT_MS / 1000}s`);
+    }
+
+    await sleep(delay);
+    delay = nextDelay(delay);
   }
 }
 
@@ -102,7 +222,7 @@ async function main() {
   if (positionals.length !== 1 || positionals[0] !== 'watch') {
     throw new Error('usage: reactions watch');
   }
-  await watch();
+  process.exitCode = await watch();
 }
 
 // Only run when executed directly, not when the test file imports the helpers.

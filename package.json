@@ -2,8 +2,9 @@
   "name": "reactions",
   "version": "0.1.0",
   "description": "Follow the GitHub Actions runs for the commit you just pushed, from the terminal.",
+  "license": "MIT",
   "type": "module",
   "bin": { "reactions": "reactions.js" },
   "engines": { "node": ">=18" },
-  "scripts": { "test": "node --test" }
+  "scripts": { "test": "node --test reactions.test.js" }
 }
