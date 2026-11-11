@@ -102,9 +102,10 @@ Planned, in this order:
 
 1. Fewer API calls: conditional requests with ETags, and slower polling when the rate limit runs low.
 2. Failure detail: the failing job and step, with the last lines of its log.
-3. Desktop notification and terminal bell when the runs finish (macOS first).
-4. `reactions watch --detach` and `reactions init`, which installs a pre-push hook so a watcher starts on every push.
-5. A tmux and zsh prompt segment that shows the status of the last push.
+3. Failure triage: when a job fails, check that job's recent history on the default branch and say whether it was already failing, is flaky, or is likely your change. A planned exit code 3 will mark the first two.
+4. Desktop notification and terminal bell when the runs finish (macOS first).
+5. `reactions watch --detach` and `reactions init`, which installs a pre-push hook so a watcher starts on every push.
+6. A tmux and zsh prompt segment that shows the status of the last push.
 
 ## Development
 
