@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { duration, exitCode, jobText, latestPerWorkflow, nextDelay, parseRemote, render } from './reactions.js';
+import { api, duration, exitCode, jobText, latestPerWorkflow, nextDelay, parseRemote, render } from './reactions.js';
 
 test('parseRemote', () => {
   assert.equal(parseRemote('https://github.com/you/app.git'), 'you/app');
@@ -68,4 +68,51 @@ test('render', () => {
     '  CI     build ok 0:42    +2 more',
     '  Lint   queued',
   ]);
+});
+
+// Swap the real fetch for a fake that answers from a list and records the
+// headers of every request. Returns those recorded headers.
+function fakeFetch(t, responses) {
+  const requests = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    requests.push(options.headers);
+    return responses.shift();
+  });
+  return requests;
+}
+
+test('api sends the ETag back and reuses the body on a 304', async (t) => {
+  const requests = fakeFetch(t, [
+    new Response('{"total_count":1}', { status: 200, headers: { etag: '"abc"' } }),
+    new Response(null, { status: 304 }),
+    new Response('{"total_count":2}', { status: 200, headers: { etag: '"def"' } }),
+    new Response(null, { status: 304 }),
+  ]);
+
+  assert.deepEqual(await api('/etag-test', 'token'), { total_count: 1 });
+  assert.equal(requests[0]['If-None-Match'], undefined);
+
+  // Unchanged: the ETag goes out and the first body comes back.
+  assert.deepEqual(await api('/etag-test', 'token'), { total_count: 1 });
+  assert.equal(requests[1]['If-None-Match'], '"abc"');
+
+  // Changed: the new body and the new ETag replace the old ones.
+  assert.deepEqual(await api('/etag-test', 'token'), { total_count: 2 });
+  assert.deepEqual(await api('/etag-test', 'token'), { total_count: 2 });
+  assert.equal(requests[3]['If-None-Match'], '"def"');
+});
+
+test('api keeps a separate ETag for each path', async (t) => {
+  const requests = fakeFetch(t, [
+    new Response('{"path":"one"}', { status: 200, headers: { etag: '"one"' } }),
+    new Response('{"path":"two"}', { status: 200, headers: { etag: '"two"' } }),
+  ]);
+  await api('/etag-one', 'token');
+  await api('/etag-two', 'token');
+  assert.equal(requests[1]['If-None-Match'], undefined);
+});
+
+test('api throws on an error status', async (t) => {
+  fakeFetch(t, [new Response('{"message":"Not Found"}', { status: 404 })]);
+  await assert.rejects(api('/etag-missing', 'token'), /GitHub API 404 on \/etag-missing/);
 });

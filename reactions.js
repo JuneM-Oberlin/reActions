@@ -42,17 +42,35 @@ function getToken() {
   return token;
 }
 
-// GET a GitHub REST API path and return the parsed JSON. Throws on any non-2xx.
-async function api(path, token) {
-  const res = await fetch(`https://api.github.com${path}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2026-03-10',
-    },
-  });
+// The last response for each API path, as { etag, body }.
+const responseCache = new Map();
+
+// GET a GitHub REST API path and return the parsed JSON. Throws on an error status.
+//
+// Each response comes with an ETag, a fingerprint of its content. Sending it
+// back as If-None-Match lets GitHub answer "304 Not Modified" with no body when
+// nothing has changed, and a 304 does not count against the rate limit.
+export async function api(path, token) {
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2026-03-10',
+  };
+  const cached = responseCache.get(path);
+  if (cached) {
+    headers['If-None-Match'] = cached.etag;
+  }
+
+  const res = await fetch(`https://api.github.com${path}`, { headers });
+  if (res.status === 304) return cached.body;
   if (!res.ok) throw new Error(`GitHub API ${res.status} on ${path}: ${await res.text()}`);
-  return res.json();
+
+  const body = await res.json();
+  const etag = res.headers.get('etag');
+  if (etag) {
+    responseCache.set(path, { etag, body });
+  }
+  return body;
 }
 
 // 72000 ms -> "1:12"
