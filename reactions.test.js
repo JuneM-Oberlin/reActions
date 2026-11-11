@@ -1,6 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { api, duration, exitCode, jobText, latestPerWorkflow, nextDelay, parseRemote, render } from './reactions.js';
+import {
+  api,
+  duration,
+  exitCode,
+  jobText,
+  latestPerWorkflow,
+  nextDelay,
+  parseRemote,
+  quotaDelay,
+  rateLimit,
+  render,
+} from './reactions.js';
 
 test('parseRemote', () => {
   assert.equal(parseRemote('https://github.com/you/app.git'), 'you/app');
@@ -115,4 +126,41 @@ test('api keeps a separate ETag for each path', async (t) => {
 test('api throws on an error status', async (t) => {
   fakeFetch(t, [new Response('{"message":"Not Found"}', { status: 404 })]);
   await assert.rejects(api('/etag-missing', 'token'), /GitHub API 404 on \/etag-missing/);
+});
+
+test('quotaDelay', () => {
+  const now = 1_000_000;
+  const inTenMinutes = now + 600_000;
+
+  // Plenty left: no extra wait.
+  assert.equal(quotaDelay(5_000, inTenMinutes, now, 3), 0);
+  assert.equal(quotaDelay(500, inTenMinutes, now, 3), 0);
+
+  // 90 requests at 3 per poll is 30 polls, spread over 10 minutes: 20 seconds each.
+  assert.equal(quotaDelay(90, inTenMinutes, now, 3), 20_000);
+
+  // Not enough left for even one poll: wait for the reset.
+  assert.equal(quotaDelay(2, inTenMinutes, now, 3), 600_000);
+  assert.equal(quotaDelay(0, inTenMinutes, now, 3), 600_000);
+
+  // The reset time has already passed: nothing to wait for.
+  assert.equal(quotaDelay(0, now - 1_000, now, 3), 0);
+});
+
+test('api records the rate limit from every response, including a 304', async (t) => {
+  fakeFetch(t, [
+    new Response('{}', { status: 200, headers: { etag: '"q"', 'x-ratelimit-remaining': '42', 'x-ratelimit-reset': '1700000000' } }),
+    new Response(null, { status: 304, headers: { 'x-ratelimit-remaining': '41', 'x-ratelimit-reset': '1700000000' } }),
+    new Response('{}', { status: 200 }),
+  ]);
+
+  await api('/quota-test', 'token');
+  assert.deepEqual(rateLimit, { remaining: 42, resetAt: 1_700_000_000_000 });
+
+  await api('/quota-test', 'token');
+  assert.equal(rateLimit.remaining, 41);
+
+  // A response without the headers leaves the last known values alone.
+  await api('/quota-other', 'token');
+  assert.equal(rateLimit.remaining, 41);
 });

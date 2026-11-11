@@ -9,6 +9,7 @@ import { parseArgs } from 'node:util';
 const FIRST_POLL_MS = 3_000; // wait this long before the second poll
 const MAX_POLL_MS = 20_000; // the wait grows toward this
 const NO_RUNS_TIMEOUT_MS = 30_000; // give up if the commit never gets a run
+const LOW_QUOTA = 500; // slow down when this few API requests are left
 const PASSING = ['success', 'skipped', 'neutral']; // run conclusions that count as a pass
 
 // Run a command and return its trimmed stdout. Throws if it exits non-zero;
@@ -45,6 +46,10 @@ function getToken() {
 // The last response for each API path, as { etag, body }.
 const responseCache = new Map();
 
+// What GitHub last told us about the rate limit (5,000 requests per hour):
+// how many requests are left, and when the count resets (in ms, like Date.now()).
+export const rateLimit = { remaining: Infinity, resetAt: 0 };
+
 // GET a GitHub REST API path and return the parsed JSON. Throws on an error status.
 //
 // Each response comes with an ETag, a fingerprint of its content. Sending it
@@ -62,6 +67,13 @@ export async function api(path, token) {
   }
 
   const res = await fetch(`https://api.github.com${path}`, { headers });
+
+  // Every response, including a 304, reports the rate limit. The reset time is in seconds.
+  if (res.headers.has('x-ratelimit-remaining')) {
+    rateLimit.remaining = Number(res.headers.get('x-ratelimit-remaining'));
+    rateLimit.resetAt = Number(res.headers.get('x-ratelimit-reset')) * 1000;
+  }
+
   if (res.status === 304) return cached.body;
   if (!res.ok) throw new Error(`GitHub API ${res.status} on ${path}: ${await res.text()}`);
 
@@ -125,6 +137,18 @@ export function exitCode(runs) {
 // Each wait is 25% longer than the last, up to the maximum.
 export function nextDelay(ms) {
   return Math.min(MAX_POLL_MS, Math.round(ms * 1.25));
+}
+
+// How long to wait between polls when the rate limit is running low, so the
+// requests that are left last until the limit resets. Returns 0 when there is
+// plenty left.
+export function quotaDelay(remaining, resetAt, now, requestsPerPoll) {
+  if (remaining >= LOW_QUOTA) return 0;
+
+  const msUntilReset = Math.max(0, resetAt - now);
+  const pollsLeft = Math.floor(remaining / requestsPerPoll);
+  if (pollsLeft === 0) return msUntilReset; // nothing left: wait for the reset
+  return Math.round(msUntilReset / pollsLeft);
 }
 
 // The whole display as a list of lines. Each entry is { run, jobList }.
@@ -218,6 +242,13 @@ async function watch() {
       lines = render(title, entries, Date.now());
     }
 
+    // A poll costs at most one request for the run list plus one per run.
+    const requestsPerPoll = 1 + runs.length;
+    const slowDelay = quotaDelay(rateLimit.remaining, rateLimit.resetAt, Date.now(), requestsPerPoll);
+    if (!done && slowDelay > delay) {
+      lines.push(`  rate limit low (${rateLimit.remaining} requests left): next check in ${duration(slowDelay)}`);
+    }
+
     // In a terminal, redraw in place on every poll. When piped, print the final state once.
     if (process.stdout.isTTY) {
       linesOnScreen = redraw(lines, linesOnScreen);
@@ -230,7 +261,7 @@ async function watch() {
       throw new Error(`no runs found for ${sha.slice(0, 7)} after ${NO_RUNS_TIMEOUT_MS / 1000}s`);
     }
 
-    await sleep(delay);
+    await sleep(Math.max(delay, slowDelay));
     delay = nextDelay(delay);
   }
 }
