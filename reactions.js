@@ -61,6 +61,7 @@ export async function api(path, token) {
     Accept: 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2026-03-10',
   };
+  // If we have asked for this path before, send the ETag we got back then.
   const cached = responseCache.get(path);
   if (cached) {
     headers['If-None-Match'] = cached.etag;
@@ -74,9 +75,15 @@ export async function api(path, token) {
     rateLimit.resetAt = Number(res.headers.get('x-ratelimit-reset')) * 1000;
   }
 
-  if (res.status === 304) return cached.body;
-  if (!res.ok) throw new Error(`GitHub API ${res.status} on ${path}: ${await res.text()}`);
+  // Nothing changed since last time, so the body we saved is still right.
+  if (res.status === 304) {
+    return cached.body;
+  }
+  if (!res.ok) {
+    throw new Error(`GitHub API ${res.status} on ${path}: ${await res.text()}`);
+  }
 
+  // A new or changed response: save it with its ETag for next time.
   const body = await res.json();
   const etag = res.headers.get('etag');
   if (etag) {
@@ -147,7 +154,11 @@ export function quotaDelay(remaining, resetAt, now, requestsPerPoll) {
 
   const msUntilReset = Math.max(0, resetAt - now);
   const pollsLeft = Math.floor(remaining / requestsPerPoll);
-  if (pollsLeft === 0) return msUntilReset; // nothing left: wait for the reset
+
+  // Not enough requests left for even one poll: wait for the reset.
+  if (pollsLeft === 0) return msUntilReset;
+
+  // Otherwise spread the polls that are left evenly over the time until the reset.
   return Math.round(msUntilReset / pollsLeft);
 }
 
@@ -242,11 +253,14 @@ async function watch() {
       lines = render(title, entries, Date.now());
     }
 
-    // A poll costs at most one request for the run list plus one per run.
+    // Normally wait `delay` before the next poll. If the rate limit is running
+    // low, wait longer and say why. A poll costs at most one request for the
+    // run list plus one per run.
     const requestsPerPoll = 1 + runs.length;
-    const slowDelay = quotaDelay(rateLimit.remaining, rateLimit.resetAt, Date.now(), requestsPerPoll);
-    if (!done && slowDelay > delay) {
-      lines.push(`  rate limit low (${rateLimit.remaining} requests left): next check in ${duration(slowDelay)}`);
+    const lowQuotaDelay = quotaDelay(rateLimit.remaining, rateLimit.resetAt, Date.now(), requestsPerPoll);
+    const wait = Math.max(delay, lowQuotaDelay);
+    if (!done && wait > delay) {
+      lines.push(`  rate limit low (${rateLimit.remaining} requests left): next check in ${duration(wait)}`);
     }
 
     // In a terminal, redraw in place on every poll. When piped, print the final state once.
@@ -261,7 +275,7 @@ async function watch() {
       throw new Error(`no runs found for ${sha.slice(0, 7)} after ${NO_RUNS_TIMEOUT_MS / 1000}s`);
     }
 
-    await sleep(Math.max(delay, slowDelay));
+    await sleep(wait);
     delay = nextDelay(delay);
   }
 }
