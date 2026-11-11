@@ -98,14 +98,33 @@ git push && reactions watch && echo "CI passed"
 
 ## Roadmap
 
-Planned, in this order:
+Planned, in this order.
 
-1. Fewer API calls: conditional requests with ETags, and slower polling when the rate limit runs low.
-2. Failure detail: the failing job and step, with the last lines of its log.
-3. Failure triage: when a job fails, check that job's recent history on the default branch and say whether it was already failing, is flaky, or is likely your change. A planned exit code 3 will mark the first two.
-4. Desktop notification and terminal bell when the runs finish (macOS first).
-5. `reactions watch --detach` and `reactions init`, which installs a pre-push hook so a watcher starts on every push.
-6. A tmux and zsh prompt segment that shows the status of the last push.
+### Core
+
+Answer "where is my CI, what broke, and is it my fault?"
+
+1. Upstream and fork support: when the current branch has an open pull request, or an `upstream` remote exists, watch the checks in the upstream repository, because that is where a fork contributor's pull request CI runs.
+2. Maintainer approval detection: recognize runs that are held for maintainer approval (`action_required`), say so clearly, and exit with a planned exit code 4 instead of reporting a failure.
+3. Failure details: print the failing step and its annotations (file and line errors), falling back to the last 20 or so log lines.
+4. Failure triage ("is it me?"): when a job fails, check that job's recent history on the default branch and say whether it was already failing, is flaky, or is likely your change. A planned exit code 3 will mark the first two.
+
+### Daily use
+
+5. `reactions push`: run `git push`, then start watching right away. An optional pre-push hook will do the same for a plain `git push`.
+6. Desktop notifications with no dependencies: `osascript` on macOS, `notify-send` on Linux, a PowerShell toast on Windows, and the terminal bell as a fallback.
+7. `reactions rerun --failed`: re-run only the failed jobs, which needs write access to the repository. Later, offer it when triage says "likely flaky".
+8. `--json` output for scripts and AI coding agents.
+
+### Adoption
+
+9. Publish to npm so it runs with `npx`. The name `reactions` is already taken there, so this needs a different package name.
+10. A demo GIF in this README showing push, watch, a failure, and the triage verdict.
+11. `CONTRIBUTING.md` and "good first issue" labels.
+
+Possible later: a tmux and zsh prompt segment, built as a fast cached `reactions status` command, and fewer API calls through conditional requests with ETags.
+
+Not planned for now: Slack or Discord webhooks, a background daemon, a config file.
 
 ## Development
 
