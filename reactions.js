@@ -275,8 +275,13 @@ async function main() {
 }
 
 // Only run when executed directly, not when the test file imports the helpers.
+// process.argv[1] is the script that node was started with. It is missing
+// under "node -e" and in the REPL, so check it exists first.
 // realpath because npm installs the command as a symlink.
-if (realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+const scriptPath = process.argv[1];
+const runDirectly = scriptPath !== undefined && realpathSync(scriptPath) === fileURLToPath(import.meta.url);
+
+if (runDirectly) {
   // EPIPE means the reader closed the pipe early, as in "reactions watch | head".
   // Nobody is left to read the output, so stop quietly.
   process.stdout.on('error', (err) => {

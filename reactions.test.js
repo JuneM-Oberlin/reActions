@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import test from 'node:test';
 import {
   api,
@@ -163,4 +164,10 @@ test('api records the rate limit from every response, including a 304', async (t
   // A response without the headers leaves the last known values alone.
   await api('/quota-other', 'token');
   assert.equal(rateLimit.remaining, 41);
+});
+
+test('importing reactions.js with no script path does not crash', () => {
+  // Under "node -e" there is no script file, so process.argv[1] is undefined.
+  const moduleUrl = new URL('./reactions.js', import.meta.url).href;
+  execFileSync(process.execPath, ['-e', `import(${JSON.stringify(moduleUrl)})`], { stdio: 'pipe' });
 });
